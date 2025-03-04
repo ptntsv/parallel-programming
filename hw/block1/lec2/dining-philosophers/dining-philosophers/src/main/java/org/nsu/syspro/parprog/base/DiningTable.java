@@ -4,6 +4,7 @@ import org.nsu.syspro.parprog.interfaces.Fork;
 import org.nsu.syspro.parprog.interfaces.Philosopher;
 
 import java.util.ArrayList;
+import java.util.concurrent.locks.ReentrantLock;
 
 public abstract class DiningTable<P extends Philosopher, F extends Fork> {
     private final ArrayList<F> forks;

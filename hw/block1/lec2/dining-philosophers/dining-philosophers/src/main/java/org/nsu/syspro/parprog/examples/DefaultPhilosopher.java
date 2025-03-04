@@ -27,8 +27,10 @@ public class DefaultPhilosopher implements Philosopher {
     }
 
     public void onHungry(Fork left, Fork right) {
-        // TODO: implement me properly
-        eat(left, right);
+        if (left.id() < right.id())
+            eat(left, right);
+        else
+            eat(right, left);
     }
 
     @Override
