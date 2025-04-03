@@ -4,11 +4,46 @@ import org.nsu.syspro.parprog.UserThread;
 import org.nsu.syspro.parprog.external.*;
 
 import java.util.*;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 public class SolutionThread extends UserThread {
 
+
     private final Map<Long, Long> localHotness = new HashMap<>();
     static final Map<Long, CompiledMethod> globalL1 = new HashMap<>();
+    static final Map<Long, CompiledMethod> globalL2 = new HashMap<>();
+    static final Deque<CompiledMethod> compilingDone = new ArrayDeque<>();
+    static Lock lock = new ReentrantLock();
+    static Condition condition = lock.newCondition();
+
+    class CompilerThread extends Thread {
+        private final MethodID methodID;
+        private final long N;
+
+        CompilerThread(MethodID methodID, long N) {
+            this.methodID = methodID;
+            this.N = N;
+        }
+
+        @Override
+        public final void run() {
+            lock.lock();
+            try {
+                while (compilingDone.size() > N) {
+                    condition.wait();
+                }
+                CompiledMethod code = compiler.compile_l2(methodID);
+                compilingDone.add(code);
+                condition.signal();
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            } finally {
+                lock.unlock();
+            }
+        }
+    }
 
     public SolutionThread(int compilationThreadBound, ExecutionEngine exec, CompilationEngine compiler, Runnable r) {
         super(compilationThreadBound, exec, compiler, r);
@@ -21,6 +56,24 @@ public class SolutionThread extends UserThread {
         }
     }
 
+    private void updateL2(MethodID methodID) {
+        lock.lock();
+        try {
+            while (compilingDone.isEmpty()) {
+                condition.await();
+            }
+            CompiledMethod code = compilingDone.pop();
+            synchronized (globalL2) {
+                globalL2.put(methodID.id(), code);
+            }
+
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        } finally {
+            lock.unlock();
+        }
+    }
+
     @Override
     public ExecutionResult executeMethod(MethodID methodID) {
         final Long id = methodID.id();
@@ -28,13 +81,25 @@ public class SolutionThread extends UserThread {
         localHotness.put(id, lHotLevel + 1);
 
         CompiledMethod code;
+        synchronized (globalL2) {
+            code = globalL2.getOrDefault(methodID.id(), null);
+            if (code != null) return exec.execute(code);
+        }
+        if (lHotLevel > 90_000) {
+            var compThread = new CompilerThread(methodID, 100);
+            compThread.start();
+            updateL2(methodID);
+            return exec.execute(globalL2.get(id));
+        }
         synchronized (globalL1) {
             code = globalL1.getOrDefault(methodID.id(), null);
+            if (code != null) return exec.execute(code);
         }
-        if (code != null) return exec.execute(code);
         if (lHotLevel > 9_000) {
             updateL1(methodID);
         }
         return exec.interpret(methodID);
     }
+// TODO: add inner classes
+// TODO: add utility classes in the same package
 }
