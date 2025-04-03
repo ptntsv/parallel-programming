@@ -4,13 +4,23 @@ import org.nsu.syspro.parprog.UserThread;
 import org.nsu.syspro.parprog.external.*;
 
 import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class SolutionThread extends UserThread {
 
+    static class SolutionThreadFactory implements ThreadFactory {
+        @Override
+        public Thread newThread(Runnable runnable) {
+            return new L2CompilerThread(runnable);
+        }
+    }
 
+    private final ThreadFactory threadFactory;
     private final Map<Long, Long> localHotness = new HashMap<>();
     static final Map<Long, CompiledMethod> globalL1 = new HashMap<>();
     static final Map<Long, CompiledMethod> globalL2 = new HashMap<>();
@@ -18,35 +28,26 @@ public class SolutionThread extends UserThread {
     static Lock lock = new ReentrantLock();
     static Condition condition = lock.newCondition();
 
-    class CompilerThread extends Thread {
-        private final MethodID methodID;
-        private final long N;
-
-        CompilerThread(MethodID methodID, long N) {
-            this.methodID = methodID;
-            this.N = N;
-        }
-
-        @Override
-        public final void run() {
-            lock.lock();
-            try {
-                while (compilingDone.size() > N) {
-                    condition.wait();
-                }
-                CompiledMethod code = compiler.compile_l2(methodID);
-                compilingDone.add(code);
-                condition.signal();
-            } catch (InterruptedException e) {
-                throw new RuntimeException(e);
-            } finally {
-                lock.unlock();
+    private void produceL2Compilation(MethodID methodID, long N) {
+        lock.lock();
+        try {
+            while (compilingDone.size() > N) {
+                condition.wait();
             }
+            CompiledMethod code = compiler.compile_l2(methodID);
+            compilingDone.add(code);
+            condition.signal();
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        } finally {
+            lock.unlock();
         }
     }
 
+
     public SolutionThread(int compilationThreadBound, ExecutionEngine exec, CompilationEngine compiler, Runnable r) {
         super(compilationThreadBound, exec, compiler, r);
+        threadFactory = new SolutionThreadFactory();
     }
 
     private void updateL1(MethodID methodID) {
@@ -86,10 +87,11 @@ public class SolutionThread extends UserThread {
             if (code != null) return exec.execute(code);
         }
         if (lHotLevel > 90_000) {
-            var compThread = new CompilerThread(methodID, 100);
+            var compThread = threadFactory.newThread(() -> {
+                produceL2Compilation(methodID, 100);
+            });
             compThread.start();
             updateL2(methodID);
-            return exec.execute(globalL2.get(id));
         }
         synchronized (globalL1) {
             code = globalL1.getOrDefault(methodID.id(), null);
@@ -100,6 +102,17 @@ public class SolutionThread extends UserThread {
         }
         return exec.interpret(methodID);
     }
-// TODO: add inner classes
-// TODO: add utility classes in the same package
+
+    static class L2CompilerThread extends Thread {
+        private final Runnable runnable;
+
+        L2CompilerThread(Runnable runnable) {
+            this.runnable = runnable;
+        }
+
+        @Override
+        public void run() {
+            this.runnable.run();
+        }
+    }
 }
