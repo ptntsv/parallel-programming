@@ -4,24 +4,14 @@ import org.nsu.syspro.parprog.UserThread;
 import org.nsu.syspro.parprog.external.*;
 
 import java.util.*;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.locks.*;
 
 public class SolutionThread extends UserThread {
 
-    /**
-     * Thread factory utility class.
-     */
-    static class SolutionThreadFactory implements ThreadFactory {
-        @Override
-        public Thread newThread(Runnable runnable) {
-            return new L2CompilerThread(runnable);
-        }
-    }
+    private final ExecutorService pool = Executors.newSingleThreadExecutor();
 
-    private final ThreadFactory threadFactory;
     /**
      * Thread local field that contains frequency of execution of certain method.
      */
@@ -35,9 +25,9 @@ public class SolutionThread extends UserThread {
      */
     static final Map<Long, CompiledMethod> globalL2 = new HashMap<>();
     /**
-     * Buffer used by specific thread for L2 compilation.
+     * Map used by specific thread for L2 compilation.
      */
-    static final Deque<CompiledMethod> compilingDone = new ArrayDeque<>();
+    static final Map<Long, CompiledMethod> compilingDone = new HashMap<>();
     /**
      * Lock for compilingDone.
      */
@@ -46,6 +36,9 @@ public class SolutionThread extends UserThread {
      * Conditional variable for compilingDone.
      */
     static Condition condition = lock.newCondition();
+
+    static ReadWriteLock rwLock = new ReentrantReadWriteLock();
+    public static CachingCompiler cachingL1Compiler = new CachingL1Compiler();
 
 
     /**
@@ -58,10 +51,10 @@ public class SolutionThread extends UserThread {
         lock.lock();
         try {
             while (compilingDone.size() > N) {
-                condition.wait();
+                condition.await();
             }
             CompiledMethod code = compiler.compile_l2(methodID);
-            compilingDone.add(code);
+            compilingDone.put(methodID.id(), code);
             condition.signal();
         } catch (InterruptedException e) {
             throw new RuntimeException(e);
@@ -73,19 +66,6 @@ public class SolutionThread extends UserThread {
 
     public SolutionThread(int compilationThreadBound, ExecutionEngine exec, CompilationEngine compiler, Runnable r) {
         super(compilationThreadBound, exec, compiler, r);
-        threadFactory = new SolutionThreadFactory();
-    }
-
-    /**
-     * Method that updates global cache with L1 compiled methods.
-     *
-     * @param methodID Method to compile.
-     */
-    private void updateL1(MethodID methodID) {
-        CompiledMethod code = compiler.compile_l1(methodID);
-        synchronized (globalL1) {
-            globalL1.put(methodID.id(), code);
-        }
     }
 
     /**
@@ -99,9 +79,12 @@ public class SolutionThread extends UserThread {
             while (compilingDone.isEmpty()) {
                 condition.await();
             }
-            CompiledMethod code = compilingDone.pop();
-            synchronized (globalL2) {
+            CompiledMethod code = compilingDone.get(methodID.id());
+            rwLock.writeLock().lock();
+            try {
                 globalL2.put(methodID.id(), code);
+            } finally {
+                rwLock.writeLock().unlock();
             }
 
         } catch (InterruptedException e) {
@@ -118,40 +101,30 @@ public class SolutionThread extends UserThread {
         localHotness.put(id, lHotLevel + 1);
 
         CompiledMethod code;
-        synchronized (globalL2) {
+
+
+        rwLock.readLock().lock();
+        try {
             code = globalL2.getOrDefault(methodID.id(), null);
             if (code != null) return exec.execute(code);
+        } finally {
+            rwLock.readLock().unlock();
         }
         if (lHotLevel > 90_000) {
-            var compThread = threadFactory.newThread(() -> {
+            pool.execute(() -> {
                 produceL2Compilation(methodID, 100);
             });
-            compThread.start();
             updateL2(methodID);
         }
-        synchronized (globalL1) {
-            code = globalL1.getOrDefault(methodID.id(), null);
-            if (code != null) return exec.execute(code);
-        }
+
+        code = cachingL1Compiler.ask(methodID);
+        if (code != null) return exec.execute(code);
+
         if (lHotLevel > 9_000) {
-            updateL1(methodID);
+            code = compiler.compile_l1(methodID);
+            cachingL1Compiler.update(methodID, code);
+            return exec.execute(code);
         }
         return exec.interpret(methodID);
-    }
-
-    /**
-     * Specific thread to L2 compilation.
-     */
-    static class L2CompilerThread extends Thread {
-        private final Runnable runnable;
-
-        L2CompilerThread(Runnable runnable) {
-            this.runnable = runnable;
-        }
-
-        @Override
-        public void run() {
-            this.runnable.run();
-        }
     }
 }
